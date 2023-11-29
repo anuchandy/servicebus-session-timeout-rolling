@@ -5,6 +5,7 @@ import com.azure.core.util.logging.LoggingEventBuilder;
 import com.azure.messaging.servicebus.ServiceBusReceivedMessage;
 import com.azure.messaging.servicebus.ServiceBusReceiverAsyncClient;
 import com.thrive.servicebus.processor.DispositionOperations;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
@@ -17,8 +18,8 @@ import java.util.function.BiConsumer;
 
 /**
  * A receiver that is attached to a Service Bus session. The receiver will start pumping messages from the session
- * once the {@link SessionReceiver#begin(int, Duration, BiConsumer, Scheduler)} API is called and the caller subscribes
- * to the Mono this API returned.
+ * once the {@link SessionReceiver#begin(int, Duration, BiConsumer, Scheduler, Scheduler)} API is called and the caller
+ * subscribes to the Mono this API returned.
  * <p>
  *  The receiver terminates when it gets disconnected from the session. The disconnect can happen if Service Bus forcefully
  *  detaches the session (e.g., server error, session lock renewal expired), if there is a network outage,
@@ -47,26 +48,31 @@ final class SessionReceiver {
         BiConsumer<ServiceBusReceivedMessage, DispositionOperations> onMessage, Scheduler pumpScheduler, Scheduler timeoutScheduler) {
         return Mono.usingWhen(Mono.just(0),
                 __ ->  {
-                    final SessionIdleTimer sessionIdleTimer = new SessionIdleTimer(logger, sessionId, timeoutScheduler, sessionTimeout);
-                    return client.receiveMessages()
-                            .takeUntilOther(sessionIdleTimer.timeout())
-                            .flatMap(message -> Mono.fromRunnable(() -> {
-                                sessionIdleTimer.cancel();
-                                try {
-                                    onMessage.accept(message, dispositionOperations);
-                                } catch (Exception e) {
-                                    withRollerId(logger.atVerbose(), rollerId).log("Ignoring error from onMessage handler.", e);
-                                }
-                                sessionIdleTimer.start();
-                            })
-                            .subscribeOn(pumpScheduler), 1, 1)
-                    .onErrorMap(e -> SessionEndedException.forError(sessionId, e))
-                    .then(Mono.defer(() -> Mono.error(SessionEndedException.forCompletion(sessionId))));
+                    return receiveSeriallyWithTimeout(rollerId, sessionTimeout, onMessage, pumpScheduler, timeoutScheduler)
+                            .onErrorMap(e -> SessionEndedException.forError(sessionId, e))
+                            .then(Mono.defer(() -> Mono.error(SessionEndedException.forCompletion(sessionId))));
                 },
                 (__) -> terminate(rollerId, TerminalSignalType.COMPLETED),
                 (__, e) -> terminate(rollerId, TerminalSignalType.ERRORED),
                 (__) -> terminate(rollerId, TerminalSignalType.CANCELED)
         );
+    }
+
+    private Flux<Void> receiveSeriallyWithTimeout(int rollerId, Duration sessionTimeout,
+        BiConsumer<ServiceBusReceivedMessage, DispositionOperations> onMessage, Scheduler pumpScheduler, Scheduler timeoutScheduler) {
+        final SessionIdleTimer sessionIdleTimer = new SessionIdleTimer(logger, rollerId, timeoutScheduler, sessionTimeout);
+        return client.receiveMessages()
+                .takeUntilOther(sessionIdleTimer.timeout())
+                .flatMap(message -> Mono.<Void>fromRunnable(() -> {
+                    sessionIdleTimer.cancel();
+                    try {
+                        onMessage.accept(message, dispositionOperations);
+                    } catch (Exception e) {
+                        // Log and allow async chain to continue.
+                        withRollerId(logger.atVerbose(), rollerId).log("Ignoring error from onMessage handler.", e);
+                    }
+                    sessionIdleTimer.start();
+                }).subscribeOn(pumpScheduler), 1, 1);
     }
 
     private Mono<Void> terminate(int rollerId, TerminalSignalType signalType) {
@@ -99,6 +105,7 @@ final class SessionReceiver {
             try {
                 client.complete(message).block();
             } catch (Exception e) {
+                // Log and allow async chain to continue.
                 logger.atVerbose().log("Failed to complete message", e);
             }
         }
@@ -107,6 +114,7 @@ final class SessionReceiver {
             try {
                 client.abandon(message).block();
             } catch (Exception e) {
+                // Log and allow async chain to continue.
                 logger.atVerbose().log("Failed to abandon message", e);
             }
         }

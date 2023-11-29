@@ -22,7 +22,7 @@ import static com.azure.core.util.FluxUtil.monoError;
  * <p>
  * The type will keep pumping messages from the current {@link SessionReceiver}, transparently roll and continue
  * pumping from the next {@link SessionReceiver} when the last one terminates. The pumping starts once
- * {@link RollingSessionReceiver#begin(Scheduler)} is called and caller subscribes to the Mono this API returned.
+ * {@link RollingSessionReceiver#begin(Scheduler, Scheduler)} is called and caller subscribes to the Mono this API returned.
  * </p>
  * <p>
  * If the type is unable to roll to a new {@link SessionReceiver} due to an error from the {@link SessionProvider},

@@ -15,17 +15,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 final class SessionIdleTimer {
     private static final Duration CANCEL = Duration.ofDays(365);
-    private final AtomicBoolean monoObtained = new AtomicBoolean(false);
+    private final AtomicBoolean timerObtained = new AtomicBoolean(false);
     private final Sinks.Many<Duration> timerSink = Sinks.many().multicast().onBackpressureBuffer();
     private final ClientLogger logger;
-    private final String sessionId;
-    private final Scheduler timeoutScheduler;
+    private final int rollerId;
+    private final Scheduler timerScheduler;
     private final Duration timeout;
 
-    SessionIdleTimer(ClientLogger logger, String sessionId, Scheduler timeoutScheduler, Duration timeout) {
+    SessionIdleTimer(ClientLogger logger, int rollerId, Scheduler timerScheduler, Duration timeout) {
         this.logger = Objects.requireNonNull(logger);
-        this.sessionId = Objects.requireNonNull(sessionId);
-        this.timeoutScheduler = Objects.requireNonNull(timeoutScheduler);
+        this.rollerId = rollerId;
+        this.timerScheduler = Objects.requireNonNull(timerScheduler);
         this.timeout = Objects.requireNonNull(timeout);
     }
 
@@ -40,20 +40,22 @@ final class SessionIdleTimer {
      * @return the timeout mono.
      */
     Mono<Void> timeout() {
-        final Mono<Void> canObtainOnce = Mono.fromRunnable(() -> {
-            if (monoObtained.getAndSet(true)) {
+        final Mono<Void> assertNotObtained = Mono.fromRunnable(() -> {
+            if (timerObtained.getAndSet(true)) {
                 throw new IllegalStateException("timeout Mono can be subscribed only once.");
             }
         });
 
-        final Mono<Void> timeoutTimer = Flux.switchOnNext(timerSink.asFlux().map(d -> {
-                return d == CANCEL ? Mono.never() : Mono.delay(d, timeoutScheduler);
+        final Mono<Void> obtainTimer = Flux.switchOnNext(timerSink.asFlux().map(d -> {
+                return d == CANCEL ? Mono.never() : Mono.delay(d, timerScheduler);
             }))
             .take(1)
-            .doOnNext(__ -> logger.atInfo().log("Did not a receive message from the session {} within timeout {}.", sessionId, timeout))
+            .doOnNext(__ -> logger.atInfo()
+                    .addKeyValue("rollerId", rollerId)
+                    .log("Did not a receive message from the session within timeout {}.", timeout))
             .then();
 
-        return canObtainOnce.then(timeoutTimer)
+        return assertNotObtained.then(obtainTimer)
                 .doOnSubscribe(__ -> {
                     start();
                 });
@@ -66,6 +68,10 @@ final class SessionIdleTimer {
      * If the {@link SessionIdleTimer#cancel()} is called before the timer expiration then timeout mono will continue
      * to stay in non-terminated (alive) state.
      * </p>
+     * <p>
+     * It is important for caller to ensure that start and cancel calls never overlaps, i.e, calls must happens serially
+     * to adhere to reactive serialized access.
+     * </p>
      */
     void start() {
         timerSink.emitNext(timeout, Sinks.EmitFailureHandler.FAIL_FAST);
@@ -73,6 +79,10 @@ final class SessionIdleTimer {
 
     /**
      * Cancel the timer that is currently running (which was started by @link SessionIdleTimer#start()}).
+     * <p>
+     * It is important for caller to ensure that start and cancel calls never overlaps, i.e, calls must happens serially
+     * to adhere to reactive serialized access.
+     * </p>
      */
     void cancel() {
         timerSink.emitNext(CANCEL, Sinks.EmitFailureHandler.FAIL_FAST);

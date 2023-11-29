@@ -13,15 +13,18 @@ import java.util.function.BiConsumer;
 
 /**
  * A type that pumps messages across concurrent sessions. The pumping starts once the {@link ServiceBusSessionProcessor#start()}
- * is called. Disposing the {@link Disposable} returned by the start API will tear down the pumping. The start API can be
- * called only once. Tearing down is not an operation performed frequently, once teared down, to restart create a new
- * {@link ServiceBusSessionProcessor}.
+ * is called. Disposing the {@link Disposable} returned by the start API will tear down the pumping.
+ * <p>
+ * The start API can be called only once. Tearing down is not an operation performed frequently, once teared down,
+ * to restart create a new {@link ServiceBusSessionProcessor} and call start on it.
+ * </p>
  */
 public final class ServiceBusSessionProcessor {
     /**
-     * Load balance the concurrency across the pumps.
+     * Load balance the concurrency across the pumps, at most 30 concurrent sessions per pump.
      */
     private static final int SESSIONS_PER_PUMP = 30;
+    private final int[] maxConcurrentSessionsPerPump;
     private final AtomicBoolean isStarted = new AtomicBoolean(false);
     private final String connectionString;
     private final String queueName;
@@ -31,7 +34,6 @@ public final class ServiceBusSessionProcessor {
     private final Duration sessionTimeout;
     private BiConsumer<ServiceBusReceivedMessage, DispositionOperations> onMessage;
     private final String namespace;
-    private final int[] concurrentSessionsPerPump;
     private final Disposable.Composite disposable = Disposables.composite();
 
     public ServiceBusSessionProcessor(String connectionString, String topicName, String subscriptionName,
@@ -45,7 +47,7 @@ public final class ServiceBusSessionProcessor {
         this.sessionTimeout = Objects.requireNonNull(sessionTimeout);
         this.onMessage = Objects.requireNonNull(onMessage);
         this.namespace = Objects.requireNonNull(namespace);
-        this.concurrentSessionsPerPump = splitPerPump(maxConcurrentSessions);
+        this.maxConcurrentSessionsPerPump = splitPerPump(maxConcurrentSessions);
     }
 
     public ServiceBusSessionProcessor(String connectionString, String queueName,
@@ -59,7 +61,7 @@ public final class ServiceBusSessionProcessor {
         this.sessionTimeout = Objects.requireNonNull(sessionTimeout);
         this.onMessage = Objects.requireNonNull(onMessage);
         this.namespace = Objects.requireNonNull(namespace);
-        this.concurrentSessionsPerPump = splitPerPump(maxConcurrentSessions);
+        this.maxConcurrentSessionsPerPump = splitPerPump(maxConcurrentSessions);
     }
 
     public Disposable start() {
@@ -69,16 +71,16 @@ public final class ServiceBusSessionProcessor {
         if (disposable.isDisposed()) {
             throw new IllegalStateException("The start() cannot be called after disposal.");
         }
-        final int c = concurrentSessionsPerPump.length;
+        final int c = maxConcurrentSessionsPerPump.length;
         final boolean isQueue = queueName != null;
         for (int i = 0; i < c; i++) {
             final RetryableConcurrentSessionsPumping pumping;
             if (isQueue) {
                 pumping = new RetryableConcurrentSessionsPumping(i, connectionString, queueName,
-                        concurrentSessionsPerPump[i], maxSessionLockRenewal, sessionTimeout, onMessage, namespace);
+                        maxConcurrentSessionsPerPump[i], maxSessionLockRenewal, sessionTimeout, onMessage, namespace);
             } else {
                 pumping = new RetryableConcurrentSessionsPumping(i, connectionString, topicName, subscriptionName,
-                        concurrentSessionsPerPump[i], maxSessionLockRenewal, sessionTimeout, onMessage, namespace);
+                        maxConcurrentSessionsPerPump[i], maxSessionLockRenewal, sessionTimeout, onMessage, namespace);
             }
             if (!disposable.add(pumping.begin())) {
                 throw new IllegalStateException("The start() cannot be called after disposal.");
@@ -88,25 +90,25 @@ public final class ServiceBusSessionProcessor {
     }
 
     private static int [] splitPerPump(int maxConcurrentSessions) {
-        final int [] concurrentSessionsPerPump;
+        final int [] maxConcurrentSessionsPerPump;
         if (maxConcurrentSessions <= SESSIONS_PER_PUMP) {
-            concurrentSessionsPerPump = new int[1];
-            concurrentSessionsPerPump[0] = maxConcurrentSessions;
+            maxConcurrentSessionsPerPump = new int[1];
+            maxConcurrentSessionsPerPump[0] = maxConcurrentSessions;
         } else {
             final int a = maxConcurrentSessions / SESSIONS_PER_PUMP;
             final int d = maxConcurrentSessions % SESSIONS_PER_PUMP;
             if (d <= SESSIONS_PER_PUMP / 4) {
-                concurrentSessionsPerPump = new int[a];
-                Arrays.fill(concurrentSessionsPerPump, SESSIONS_PER_PUMP);
+                maxConcurrentSessionsPerPump = new int[a];
+                Arrays.fill(maxConcurrentSessionsPerPump, SESSIONS_PER_PUMP);
                 for (int i = 0; i < d; i++) {
-                    concurrentSessionsPerPump[i % a] += 1;
+                    maxConcurrentSessionsPerPump[i % a] += 1;
                 }
             } else {
-                concurrentSessionsPerPump = new int[a + 1];
-                Arrays.fill(concurrentSessionsPerPump, 0, a, SESSIONS_PER_PUMP);
-                concurrentSessionsPerPump[a] = d;
+                maxConcurrentSessionsPerPump = new int[a + 1];
+                Arrays.fill(maxConcurrentSessionsPerPump, 0, a, SESSIONS_PER_PUMP);
+                maxConcurrentSessionsPerPump[a] = d;
             }
         }
-        return concurrentSessionsPerPump;
+        return maxConcurrentSessionsPerPump;
     }
 }

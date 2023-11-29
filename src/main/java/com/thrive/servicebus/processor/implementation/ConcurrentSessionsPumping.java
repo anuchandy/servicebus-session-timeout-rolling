@@ -62,7 +62,7 @@ final class ConcurrentSessionsPumping {
     }
 
     Mono<Void> begin() {
-        final Mono<Void> pumping = Mono.usingWhen(createPumpResource(), this::beginPumping,
+        final Mono<Void> pumping = Mono.usingWhen(createResource(), resource -> beginPumping(resource),
                 resource -> terminate(resource, TerminalSignalType.COMPLETED),
                 (resource, e) -> terminate(resource, TerminalSignalType.ERRORED),
                 (resource) -> terminate(resource, TerminalSignalType.CANCELED));
@@ -72,7 +72,7 @@ final class ConcurrentSessionsPumping {
                 .then(Mono.error(() -> SessionsPumpTerminatedException.forCompletion(pumpId, namespace, entityPath)));
     }
 
-    private Mono<PumpResource> createPumpResource() {
+    private Mono<Resource> createResource() {
         return Mono.fromSupplier(() -> {
             throwIfTerminatedOrInitialized();
             final ArrayList<RollingSessionReceiver> rollingReceivers = new ArrayList<>(maxConcurrentSessions);
@@ -87,15 +87,15 @@ final class ConcurrentSessionsPumping {
             }
             final Scheduler pumpScheduler = Schedulers.newBoundedElastic(DEFAULT_BOUNDED_ELASTIC_SIZE,
                     DEFAULT_BOUNDED_ELASTIC_QUEUESIZE, "pumping-" + pumpId);
-            final Scheduler timeoutScheduler = Schedulers.newParallel("timeout-" + pumpId, Schedulers.DEFAULT_POOL_SIZE);
-            return new PumpResource(rollingReceivers, pumpScheduler, timeoutScheduler);
+            final Scheduler timerScheduler = Schedulers.newParallel("timer-" + pumpId, Schedulers.DEFAULT_POOL_SIZE);
+            return new Resource(rollingReceivers, pumpScheduler, timerScheduler);
         });
     }
 
-    private Mono<Void> beginPumping(PumpResource resource) {
+    private Mono<Void> beginPumping(Resource resource) {
         final List<RollingSessionReceiver> rollingReceivers = resource.getReceivers();
-        final Scheduler pumpScheduler = resource.getScheduler();
-        final Scheduler timeoutScheduler = resource.getTimeoutScheduler();
+        final Scheduler pumpScheduler = resource.getPumpScheduler();
+        final Scheduler timeoutScheduler = resource.getTimerScheduler();
 
         final List<Mono<Void>> pumpingList = new ArrayList<>(rollingReceivers.size());
         for (RollingSessionReceiver rollingReceiver : rollingReceivers) {
@@ -105,11 +105,12 @@ final class ConcurrentSessionsPumping {
         return pumping;
     }
 
-    private Mono<Void> terminate(PumpResource resource, TerminalSignalType signalType) {
+    private Mono<Void> terminate(Resource resource, TerminalSignalType signalType) {
         final State s = state.getAndSet(State.TERMINATED);
         if (s != State.TERMINATED) {
             logger.atInfo().log("Pump terminated. signal:" + signalType);
-            resource.getScheduler().dispose();
+            resource.getPumpScheduler().dispose();
+            resource.getTimerScheduler().dispose();
         }
         return Mono.empty();
     }
@@ -125,30 +126,53 @@ final class ConcurrentSessionsPumping {
         }
     }
 
-    private static class PumpResource {
+    /**
+     * The various resources that {@link ConcurrentSessionsPumping} and child types uses internally pump messages
+     * from sessions.
+     */
+    private static class Resource {
         private final List<RollingSessionReceiver> rollingSessionReceivers;
         private final Scheduler pumpScheduler;
-        private final Scheduler timeoutScheduler;
+        private final Scheduler timerScheduler;
 
-        PumpResource(List<RollingSessionReceiver> rollingSessionReceivers, Scheduler pumpScheduler, Scheduler timeoutScheduler) {
+        Resource(List<RollingSessionReceiver> rollingSessionReceivers, Scheduler pumpScheduler, Scheduler timerScheduler) {
             this.rollingSessionReceivers = rollingSessionReceivers;
             this.pumpScheduler = pumpScheduler;
-            this.timeoutScheduler = timeoutScheduler;
+            this.timerScheduler = timerScheduler;
         }
 
+        /**
+         * Gets the list of {@link RollingSessionReceiver}, where each of them serially pump messages from a specific session.
+         *
+         * @return the rolling receivers.
+         */
         List<RollingSessionReceiver> getReceivers() {
             return rollingSessionReceivers;
         }
 
-        Scheduler getScheduler() {
+        /**
+         * Gets the {@link Scheduler} that hosts threads to deliver (pump) messages to application message handler.
+         *
+         * @return the scheduler to deliver (pump) messages.
+         */
+        Scheduler getPumpScheduler() {
             return pumpScheduler;
         }
 
-        Scheduler getTimeoutScheduler() {
-            return timeoutScheduler;
+        /**
+         * Gets the {@link Scheduler} that hosts timer threads for {@link SessionIdleTimer} to time out a session
+         * when it goes idle.
+         *
+         * @return the timer threads scheduler.
+         */
+        Scheduler getTimerScheduler() {
+            return timerScheduler;
         }
     }
 
+    /**
+     * The internal state of {@link ConcurrentSessionsPumping}.
+     */
     private enum State {
         EMPTY, INITIALIZED, TERMINATED
     }

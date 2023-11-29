@@ -42,7 +42,7 @@ public final class App {
                 Config.TOPIC, Config.SUBSCRIPTION, maxConcurrentSessions, SESSION_MAX_LOCK_RENEWAL, SESSION_TIMEOUT,
                 App::onMessage, Config.NAMESPACE);
 
-        // Start pumping messages from the session enabled Config.SUBSCRIPTION under Config.TOPIC.
+        // Start pumping messages from the session enabled entity Config.SUBSCRIPTION under Config.TOPIC.
         final Disposable disposable = processor.start();
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
