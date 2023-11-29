@@ -85,20 +85,21 @@ final class ConcurrentSessionsPumping {
                 rollingReceivers.clear();
                 throwIfTerminatedOrInitialized();
             }
-            final Scheduler pumpScheduler;
-            pumpScheduler = Schedulers.newBoundedElastic(DEFAULT_BOUNDED_ELASTIC_SIZE,
+            final Scheduler pumpScheduler = Schedulers.newBoundedElastic(DEFAULT_BOUNDED_ELASTIC_SIZE,
                     DEFAULT_BOUNDED_ELASTIC_QUEUESIZE, "pumping-" + pumpId);
-            return new PumpResource(rollingReceivers, pumpScheduler);
+            final Scheduler timeoutScheduler = Schedulers.newParallel("timeout-" + pumpId, Schedulers.DEFAULT_POOL_SIZE);
+            return new PumpResource(rollingReceivers, pumpScheduler, timeoutScheduler);
         });
     }
 
     private Mono<Void> beginPumping(PumpResource resource) {
         final List<RollingSessionReceiver> rollingReceivers = resource.getReceivers();
         final Scheduler pumpScheduler = resource.getScheduler();
+        final Scheduler timeoutScheduler = resource.getTimeoutScheduler();
 
         final List<Mono<Void>> pumpingList = new ArrayList<>(rollingReceivers.size());
         for (RollingSessionReceiver rollingReceiver : rollingReceivers) {
-            pumpingList.add(rollingReceiver.begin(pumpScheduler));
+            pumpingList.add(rollingReceiver.begin(pumpScheduler, timeoutScheduler));
         }
         final Mono<Void> pumping = Mono.when(pumpingList);
         return pumping;
@@ -127,10 +128,12 @@ final class ConcurrentSessionsPumping {
     private static class PumpResource {
         private final List<RollingSessionReceiver> rollingSessionReceivers;
         private final Scheduler pumpScheduler;
+        private final Scheduler timeoutScheduler;
 
-        PumpResource(List<RollingSessionReceiver> rollingSessionReceivers, Scheduler pumpScheduler) {
+        PumpResource(List<RollingSessionReceiver> rollingSessionReceivers, Scheduler pumpScheduler, Scheduler timeoutScheduler) {
             this.rollingSessionReceivers = rollingSessionReceivers;
             this.pumpScheduler = pumpScheduler;
+            this.timeoutScheduler = timeoutScheduler;
         }
 
         List<RollingSessionReceiver> getReceivers() {
@@ -139,6 +142,10 @@ final class ConcurrentSessionsPumping {
 
         Scheduler getScheduler() {
             return pumpScheduler;
+        }
+
+        Scheduler getTimeoutScheduler() {
+            return timeoutScheduler;
         }
     }
 

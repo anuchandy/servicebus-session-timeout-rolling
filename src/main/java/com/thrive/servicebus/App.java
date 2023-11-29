@@ -66,6 +66,17 @@ public final class App {
      */
     private static void onMessage(ServiceBusReceivedMessage message, DispositionOperations dispositionOperations) {
         // handle the message and complete it.
-        dispositionOperations.complete(message);
+        final boolean succeeded = Math.random() < 0.5;
+        if (succeeded) {
+            System.out.println("[" + Thread.currentThread().getName() + "] " + format(message, true));
+            dispositionOperations.complete(message);
+        } else {
+            System.out.println("[" + Thread.currentThread().getName() + "] " + format(message, false));
+            dispositionOperations.abandon(message);
+        }
+    }
+
+    private static String format(ServiceBusReceivedMessage message, boolean succeeded) {
+        return String.format("Message.SessionId: %s Message.SequenceNumber: %s Completed: %b", message.getSessionId(), message.getSequenceNumber(), succeeded);
     }
 }

@@ -5,18 +5,15 @@ import com.azure.core.util.logging.LoggingEventBuilder;
 import com.azure.messaging.servicebus.ServiceBusReceivedMessage;
 import com.azure.messaging.servicebus.ServiceBusReceiverAsyncClient;
 import com.thrive.servicebus.processor.DispositionOperations;
-import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
-import java.util.function.Function;
 
 /**
  * A receiver that is attached to a Service Bus session. The receiver will start pumping messages from the session
@@ -47,47 +44,29 @@ final class SessionReceiver {
         this.dispositionOperations = new DispositionOperationsImpl(logger, client);
     }
     Mono<Void> begin(int rollerId, Duration sessionTimeout,
-        BiConsumer<ServiceBusReceivedMessage, DispositionOperations> onMessage, Scheduler pumpScheduler) {
+        BiConsumer<ServiceBusReceivedMessage, DispositionOperations> onMessage, Scheduler pumpScheduler, Scheduler timeoutScheduler) {
         return Mono.usingWhen(Mono.just(0),
                 __ ->  {
-                    final Flux<ServiceBusReceivedMessage> messages = client.receiveMessages();
-                    return receiveSequentiallyWithTimeout(messages, rollerId, sessionTimeout, onMessage, pumpScheduler)
-                            .onErrorMap(e -> SessionEndedException.forError(sessionId, e))
-                            .then(Mono.defer(() -> Mono.error(SessionEndedException.forCompletion(sessionId))));
+                    final SessionIdleTimer sessionIdleTimer = new SessionIdleTimer(logger, sessionId, timeoutScheduler, sessionTimeout);
+                    return client.receiveMessages()
+                            .takeUntilOther(sessionIdleTimer.timeout())
+                            .flatMap(message -> Mono.fromRunnable(() -> {
+                                sessionIdleTimer.cancel();
+                                try {
+                                    onMessage.accept(message, dispositionOperations);
+                                } catch (Exception e) {
+                                    withRollerId(logger.atVerbose(), rollerId).log("Ignoring error from onMessage handler.", e);
+                                }
+                                sessionIdleTimer.start();
+                            })
+                            .subscribeOn(pumpScheduler), 1, 1)
+                    .onErrorMap(e -> SessionEndedException.forError(sessionId, e))
+                    .then(Mono.defer(() -> Mono.error(SessionEndedException.forCompletion(sessionId))));
                 },
                 (__) -> terminate(rollerId, TerminalSignalType.COMPLETED),
                 (__, e) -> terminate(rollerId, TerminalSignalType.ERRORED),
                 (__) -> terminate(rollerId, TerminalSignalType.CANCELED)
         );
-    }
-
-    private Flux<Void> receiveSequentiallyWithTimeout(Flux<ServiceBusReceivedMessage> messages, int rollerId,
-        Duration sessionTimeout, BiConsumer<ServiceBusReceivedMessage, DispositionOperations> onMessage,
-        Scheduler pumpScheduler) {
-        final Function<List<ServiceBusReceivedMessage>, Mono<Void>> processOneMessage = batch -> {
-            return Mono.<Void>fromRunnable(() -> {
-                        if (batch.isEmpty()) {
-                            throw new RuntimeException("Session terminated due to timeout or session completion.");
-                        } else {
-                            try {
-                                // batch will contain only one message.
-                                final ServiceBusReceivedMessage message = batch.get(0);
-                                onMessage.accept(message, dispositionOperations);
-                            } catch (Exception e) {
-                                withRollerId(logger.atVerbose(), rollerId).log("Ignoring error from onMessage handler.", e);
-                            }
-                        }
-                    })
-                    .subscribeOn(pumpScheduler);
-        };
-
-        return messages
-                .windowTimeout(1, sessionTimeout, true)
-                .flatMap(batchFlux-> {
-                    final Mono<List<ServiceBusReceivedMessage>> batchWithOneMessage = batchFlux.collectList();
-                    return batchWithOneMessage
-                            .flatMap(processOneMessage);
-                }, 1);
     }
 
     private Mono<Void> terminate(int rollerId, TerminalSignalType signalType) {

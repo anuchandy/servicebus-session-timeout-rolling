@@ -53,9 +53,9 @@ final class RollingSessionReceiver {
         this.sessionProvider = sessionProvider;
     }
 
-    Mono<Void> begin(Scheduler pumpScheduler) {
+    Mono<Void> begin(Scheduler pumpScheduler, Scheduler timeoutScheduler) {
         return sessionProvider.mono()
-                .flatMap(sessionReceiver -> sessionReceiver.begin(rollerId, sessionTimeout, onMessage, pumpScheduler))
+                .flatMap(sessionReceiver -> sessionReceiver.begin(rollerId, sessionTimeout, onMessage, pumpScheduler, timeoutScheduler))
                 .retryWhen(retrySpecForAcceptSession());
     }
 
